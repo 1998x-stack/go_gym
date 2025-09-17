@@ -1,0 +1,50 @@
+SEED: 42
+BOARD_SIZE: 9
+KOMI: 7.5
+
+NET:
+  planes: 8
+  channels: 96
+  blocks: 5
+  ema_decay: 0.999
+
+MCTS:
+  n_simulations: 400
+  c_puct: 1.25
+  dirichlet_epsilon: 0.25
+  dirichlet_alpha: 0.10
+  temperature_moves: 10
+  temperature_after: 0.3
+
+SELFPLAY:
+  workers: 2
+  resign_threshold: -0.95
+  resign_check_steps: 3
+  max_moves: 300
+
+REPLAY:
+  capacity: 200000
+  batch_size: 256
+  symmetries: true
+
+OPTIM:
+  lr: 1.5e-3
+  weight_decay: 1e-4
+  betas: [0.9, 0.95]
+  warmup_steps: 1000
+  total_steps: 200000
+  clip_grad_norm: 1.0
+  amp: true
+
+EVAL:
+  games: 40
+  gate_winrate: 0.55
+  sims: 600
+  c_puct: 1.25
+  dirichlet_alpha: 0.03
+  eval_interval: 2000   # 每隔多少 step 做一次门控（默认等于 save_interval）
+
+LOG:
+  tb_dir: runs/zero_9x9
+  ckpt_dir: checkpoints/zero_9x9
+  save_interval: 2000

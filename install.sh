@@ -1,0 +1,1 @@
+pip install torch loguru tensorboard pyyaml numpy gymnasium
