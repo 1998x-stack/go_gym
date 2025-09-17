@@ -28,15 +28,30 @@ class OptimConfig:
     ema_decay: float = 0.999
 
 class EMA:
+    """对模型 state_dict 做指数滑动平均：
+    - 仅对浮点张量执行滑动更新
+    - 对非浮点（long/bool 等）直接 copy（保持一致性，避免 dtype 错误）
+    """
     def __init__(self, model: torch.nn.Module, decay: float):
         self.decay = float(decay)
+        # 影子权重按原 dtype/device 完整拷贝一份
         self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
     @torch.no_grad()
     def update(self, model: torch.nn.Module):
-        for k, v in model.state_dict().items():
-            self.shadow[k].mul_(self.decay).add_(v, alpha=1.0 - self.decay)
+        msd = model.state_dict()
+        for k, v in msd.items():
+            buf = self.shadow[k]
+            if v.is_floating_point():
+                # 只对浮点参数/缓冲区做 EMA
+                buf.mul_(self.decay).add_(v, alpha=1.0 - self.decay)
+            else:
+                # 非浮点直接覆盖（如 BatchNorm 的 num_batches_tracked 为 Long）
+                buf.copy_(v)
+                
     @torch.no_grad()
     def apply_to(self, model: torch.nn.Module):
+        # 直接 load 完整影子字典（类型已与影子保持匹配）
         model.load_state_dict(self.shadow, strict=True)
 
 def cosine_lr(step: int, cfg: OptimConfig) -> float:
