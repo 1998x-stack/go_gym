@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Callable, Tuple, Optional
 import os, math, time
 from pathlib import Path
 
@@ -107,6 +107,7 @@ def learner_loop(
     # 推送 EMA 给自博弈
     ema_push_model: Optional[torch.nn.Module] = None,
     ema_push_interval: int = 2000,
+    on_ema_pushed: Optional[Callable[[torch.nn.Module], None]] = None,  # ← 新增
     # 评测门控
     komi: float = 7.5,
     eval_cfg: Optional[EvalConfig] = None,
@@ -159,8 +160,11 @@ def learner_loop(
         # 定期将 EMA 权重推送给自博弈
         if ema_push_model is not None and (step + 1) % int(ema_push_interval) == 0:
             with torch.no_grad():
-                ema.apply_to(ema_push_model); ema_push_model.eval()
+                ema.apply_to(ema_push_model)
+                ema_push_model.eval()
             logger.info(f"EMA weights pushed to selfplay model at step {step+1}")
+            if on_ema_pushed is not None:
+                on_ema_pushed(ema_push_model)  # ← 通知 batcher
 
         # —— 评测门控（arena）——
         if eval_cfg is not None and best_model is not None and (step + 1) % gate_every == 0:

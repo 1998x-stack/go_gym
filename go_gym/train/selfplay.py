@@ -8,7 +8,7 @@ from loguru import logger
 from ..core.board import Board, BLACK, WHITE, Color, Point
 from ..agents.zero_mcts import ZeroMCTS, GameState, planes_from_state, point_to_action
 from ..core.scoring import chinese_area_score
-
+from ..nn.infer_server import AsyncBatcher  # 新增
 
 @dataclass
 class SelfPlayConfig:
@@ -31,7 +31,9 @@ def temperature_for_move(t: int, cfg: SelfPlayConfig) -> float:
 
 
 def play_one_game(net: torch.nn.Module, device: torch.device, cfg: SelfPlayConfig,
-                  dump_sgf: bool = False) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
+                  dump_sgf: bool = False,
+                  eval_batcher: Optional[AsyncBatcher] = None,   # ← 新增
+                  ) -> Tuple[List[np.ndarray], List[np.ndarray], float]:
     """自博弈一盘，返回 step-wise (planes, pi) 列表与终局 z（黑视角）"""
     board = Board(cfg.board_size, allow_suicide=False, use_superko=False)
     to_play: Color = BLACK
@@ -41,7 +43,8 @@ def play_one_game(net: torch.nn.Module, device: torch.device, cfg: SelfPlayConfi
     mcts = ZeroMCTS(net, device, board_size=cfg.board_size,
                     c_puct=cfg.c_puct, n_simulations=cfg.sims,
                     dirichlet_epsilon=cfg.dirichlet_epsilon, dirichlet_alpha=cfg.dirichlet_alpha,
-                    use_planes=cfg.use_planes)
+                    use_planes=cfg.use_planes,
+                    eval_batcher=eval_batcher)   # ← 传入
 
     planes_list, pi_list = [], []
     value_track = []  # 用于认输判断（取根估计）

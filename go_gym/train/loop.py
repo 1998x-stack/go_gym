@@ -9,6 +9,7 @@ from ..data.replay import ReplayBuffer
 from ..train.selfplay import SelfPlayConfig, play_one_game
 from ..train.learner import learner_loop, OptimConfig
 from ..train.evaluator import EvalConfig   # ← 引入
+from ..nn.infer_server import AsyncBatcher  # 新增
 
 @dataclass
 class ZeroConfig:
@@ -22,17 +23,19 @@ class ZeroConfig:
     OPTIM: Dict[str, Any]
     EVAL: Dict[str, Any]
     LOG: Dict[str, Any]
+    INFER: Dict[str, Any]
 
 def load_config(path: str) -> ZeroConfig:
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     return ZeroConfig(**cfg)
 
-def selfplay_producer_thread(replay: ReplayBuffer, net_ema: PolicyValueNet, device: torch.device, sp_cfg: SelfPlayConfig):
+# 自博弈线程使用统一的 batcher
+def selfplay_producer_thread(replay, net_ema, device, sp_cfg, batcher):
     torch.manual_seed(int(time.time()) % 10_000_000)
     while True:
         try:
-            planes_list, pi_list, z = play_one_game(net_ema, device, sp_cfg)
+            planes_list, pi_list, z = play_one_game(net_ema, device, sp_cfg, eval_batcher=batcher)
             for p, pi in zip(planes_list, pi_list):
                 replay.add(p, pi, z)
         except Exception as e:
@@ -66,14 +69,21 @@ def main(config_path: str):
         resign_check_steps=int(cfg.SELFPLAY["resign_check_steps"]),
         max_moves=int(cfg.SELFPLAY["max_moves"])
     )
+    
+    batcher = AsyncBatcher(
+        net=net_ema, device=device,
+        planes=int(cfg.NET["planes"]), board_size=int(cfg.BOARD_SIZE),
+        max_batch=int((cfg.__dict__.get("INFER", {}) or {}).get("max_batch", 64)),
+        timeout_ms=int((cfg.__dict__.get("INFER", {}) or {}).get("timeout_ms", 5)),
+    )
 
     # 自博弈线程
     workers = max(1, int(cfg.SELFPLAY["workers"]))
     for i in range(workers):
-        t = threading.Thread(target=selfplay_producer_thread, args=(replay, net_ema, device, sp_cfg), daemon=True)
+        t = threading.Thread(target=selfplay_producer_thread, args=(replay, net_ema, device, sp_cfg, batcher), daemon=True)
         t.start()
         logger.info(f"Selfplay worker #{i} started.")
-
+        
     # 优化器配置
     optim_cfg = OptimConfig(
         lr=float(cfg.OPTIM["lr"]), weight_decay=float(cfg.OPTIM["weight_decay"]),
@@ -105,7 +115,7 @@ def main(config_path: str):
         optim_cfg=optim_cfg, channels=int(cfg.NET["channels"]), blocks=int(cfg.NET["blocks"]),
         batch_size=int(cfg.REPLAY["batch_size"]), save_interval=int(cfg.LOG["save_interval"]),
         max_steps=int(cfg.OPTIM["total_steps"]), device=str(device),
-        ema_push_model=net_ema, ema_push_interval=int(cfg.LOG["save_interval"]),
+        ema_push_model=net_ema, ema_push_interval=int(cfg.LOG["save_interval"]), on_ema_pushed=lambda m: batcher.update_net(m),
         komi=float(cfg.KOMI), eval_cfg=eval_cfg, best_model=best_model, eval_interval=eval_interval
     )
 

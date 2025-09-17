@@ -2,13 +2,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 import math
-import random
+import threading
 import numpy as np
 import torch
 from loguru import logger
 
 from ..core.board import Board, BLACK, WHITE, EMPTY, Color, Point
 from ..core.scoring import chinese_area_score
+from ..core.zobrist import hash_grid
+from ..nn.infer_server import AsyncBatcher   # 新增
 
 
 # ----------------- 状态与观测 -----------------
@@ -100,13 +102,11 @@ class Node:
 class ZeroMCTS:
     """神经网络引导的 PUCT 搜索（单进程版，附带根噪声与温度采样）。"""
     def __init__(self, net: torch.nn.Module, device: torch.device,
-                 board_size: int, c_puct: float = 1.25,
-                 n_simulations: int = 400,
+                 board_size: int, c_puct: float = 1.25, n_simulations: int = 400,
                  dirichlet_epsilon: float = 0.25, dirichlet_alpha: float = 0.10,
-                 use_planes: int = 8,
-                 cache_capacity: int = 100000):
+                 use_planes: int = 8, cache_capacity: int = 100000,
+                 eval_batcher: Optional[AsyncBatcher] = None):   # 新增
         self.net = net
-        self.net.eval()
         self.device = device
         self.size = int(board_size)
         self.A = action_space_size(self.size)
@@ -115,8 +115,9 @@ class ZeroMCTS:
         self.dir_eps = float(dirichlet_epsilon)
         self.dir_alpha = float(dirichlet_alpha)
         self.use_planes = int(use_planes)
-        self.cache: Dict[Tuple[int, bytes], Tuple[np.ndarray, float]] = {}
+        self.cache: Dict[int, Tuple[np.ndarray, float]] = {}   # <--- Zobrist key
         self.cache_capacity = int(cache_capacity)
+        self.eval_batcher = eval_batcher
 
     # ---------- 搜索入口 ----------
     def run(self, root_state: GameState, temperature: float = 1.0, add_root_noise: bool = True) -> Tuple[np.ndarray, int]:
@@ -201,7 +202,7 @@ class ZeroMCTS:
         node.legal_actions = legal_actions
 
         # Eval policy & value
-        P, v_black = self._eval_state(state)
+        P, v_black = self._eval_state(state, legal_actions)  # 传入合法动作，便于批处理mask
 
         # 只保留合法动作的先验，并做归一化（避免全部为零的退化）
         priors = np.zeros(self.A, dtype=np.float32)
@@ -250,33 +251,45 @@ class ZeroMCTS:
         return best
 
     # ---------- 评估（批量可扩展） ----------
-    def _eval_state(self, s: GameState) -> Tuple[np.ndarray, float]:
-        key = (int(s.to_play), s.board.grid.tobytes())
+    def _eval_state(self, s: GameState, legal_actions: Optional[List[int]] = None) -> Tuple[np.ndarray, float]:
+        # --- Zobrist 缓存 ---
+        key = hash_grid(s.board.grid, s.to_play)
         if key in self.cache:
-            P, v = self.cache[key]
-            return P, v
+            return self.cache[key]
 
-        x = planes_from_state(s, self.use_planes)             # [C,H,W]
-        x = torch.from_numpy(x).unsqueeze(0).to(self.device)  # [1,C,H,W]
-        with torch.no_grad():
-            logits, value = self.net(x)                       # [1,A], [1,1]
-            logits = logits.float()
-            value  = value.float()
+        # --- 异步批量：若提供 batcher，就走 submit/回调 ---
+        if self.eval_batcher is not None:
+            done = threading.Event()
+            out: Tuple[np.ndarray, float] = (None, 0.0)  # type: ignore
 
-        # --- 构造“批量维度”的合法掩码，避免 1D mask 索引 2D tensor 的错误 ---
-        legal_mask_1d = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
-        for a in [point_to_action(p, self.size) for p in s.legal_moves()]:
-            legal_mask_1d[a] = True
-        legal_mask = legal_mask_1d.unsqueeze(0).expand_as(logits)  # [1,A]
+            def _cb(P: np.ndarray, v: float):
+                nonlocal out
+                out = (P, v)
+                done.set()
 
-        # 对非法动作置极小，屏蔽掉
-        logits = logits.masked_fill(~legal_mask, -1e9)
-        P = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy().astype(np.float32)
-        v = float(value.squeeze(0).item())
+            planes = planes_from_state(s, self.use_planes)
+            la = legal_actions if legal_actions is not None else [point_to_action(p, self.size) for p in s.legal_moves()]
+            self.eval_batcher.submit(planes, la, _cb)
+            done.wait()  # 阻塞等待
+            P, v = out
+        else:
+            # --- 单样本前向（老路径） ---
+            x = planes_from_state(s, self.use_planes)
+            x = torch.from_numpy(x).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                logits, value = self.net(x)
+                logits = logits.float()
+                value = value.float()
+            legal_mask_1d = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
+            la = legal_actions if legal_actions is not None else [point_to_action(p, self.size) for p in s.legal_moves()]
+            for a in la:
+                legal_mask_1d[a] = True
+            logits = logits.masked_fill(~legal_mask_1d.unsqueeze(0), -1e9)
+            P = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy().astype(np.float32)
+            v = float(value.squeeze(0).item())
 
-        # 缓存（近似 FIFO）
+        # 缓存（简单近似FIFO）
         if len(self.cache) >= self.cache_capacity:
             self.cache.pop(next(iter(self.cache)))
         self.cache[key] = (P, v)
-
         return P, v

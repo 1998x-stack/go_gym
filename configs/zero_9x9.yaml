@@ -48,3 +48,8 @@ LOG:
   tb_dir: runs/zero_9x9
   ckpt_dir: checkpoints/zero_9x9
   save_interval: 2000
+
+INFER:
+  max_batch: 64     # 批大小上限
+  timeout_ms: 5     # 聚合窗口（毫秒）
+
