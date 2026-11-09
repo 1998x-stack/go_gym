@@ -8,7 +8,6 @@ from loguru import logger
 
 from ..core.board import Board, BLACK, WHITE, Color, Point
 from ..core.scoring import chinese_area_score
-from ..core.zobrist import hash_grid
 from ..nn.infer_server import AsyncBatcher
 
 # ---------- helpers ----------
@@ -84,7 +83,7 @@ class ZeroMCTS:
         self.dir_eps = float(dirichlet_epsilon)
         self.dir_alpha = float(dirichlet_alpha)
         self.use_planes = int(use_planes)
-        self.cache: Dict[int, Tuple[np.ndarray, float]] = {}
+        self.cache: Dict[tuple, Tuple[np.ndarray, float]] = {}
         self.cache_capacity = int(cache_capacity)
         self.eval_batcher = eval_batcher
 
@@ -173,7 +172,8 @@ class ZeroMCTS:
             Q = node.Q.get(a, 0.0)
             P = node.P.get(a, 0.0)
             U = self.c_puct * P * math.sqrt(sumN) / (1.0 + node.N.get(a, 0))
-            score = (Q if node.to_play == BLACK else -Q) + U
+            # Q is already stored from the actor at this node, not black's perspective.
+            score = Q + U
             if score > best_score:
                 best_score, best = score, a
         assert best is not None
@@ -181,8 +181,16 @@ class ZeroMCTS:
 
     # -- eval path (policy+value, with async batcher and Zobrist cache) --
     def _eval_policy_value(self, s: GameState, legal_actions: Optional[List[int]] = None) -> Tuple[np.ndarray, float]:
-        key = hash_grid(s.board.grid, s.to_play)
-        if key in self.cache:
+        # The policy consumes last_move and the legal mask depends on ko history.
+        # A board/side-only Zobrist key silently reused stale priors across these states.
+        # Under superko, legality depends on the whole history: skip this cache.
+        key = None if s.board.use_superko else (
+            s.board.grid.tobytes(),
+            int(s.to_play),
+            s.last_move,
+            s.board.history[-1] if s.board.history else None,
+        )
+        if key is not None and key in self.cache:
             return self.cache[key]
 
         if self.eval_batcher is not None:
@@ -208,9 +216,10 @@ class ZeroMCTS:
             P = torch.softmax(logits, dim=-1).squeeze(0).cpu().numpy().astype(np.float32)
             v = float(value.squeeze(0).item())
 
-        if len(self.cache) >= self.cache_capacity:
-            self.cache.pop(next(iter(self.cache)))
-        self.cache[key] = (P, v)
+        if key is not None and self.cache_capacity > 0:
+            if len(self.cache) >= self.cache_capacity:
+                self.cache.pop(next(iter(self.cache)))
+            self.cache[key] = (P, v)
         return P, v
 
     def _eval_value(self, s: GameState) -> float:
