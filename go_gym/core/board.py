@@ -134,7 +134,10 @@ class Board:
     def is_legal(self, color: Color, p: Optional[Point], to_play: Color) -> bool:
         """合法性：空点、禁自杀、普通劫禁（或可选超级劫）。"""
         try:
-            # pass 永远合法
+            # Disallow wrong-color turns; callers must not bypass move order.
+            if color not in (BLACK, WHITE) or to_play != color:
+                return False
+            # pass is legal for the active player.
             if p is None:
                 return True
             if not self.in_bounds(p) or self.get(p) != EMPTY:
