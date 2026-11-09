@@ -1,0 +1,30 @@
+name: P2 Go rule and search contract
+
+on:
+  push:
+    branches: [main, "optimize/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install core and Gymnasium dependencies
+        run: python -m pip install numpy gymnasium loguru
+      - name: Install PyTorch CPU
+        run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Python syntax check
+        run: python -m compileall -q go_gym tests
+      - name: Board, environment and MCTS regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Deterministic small-board real UCT self-play
+        run: python selfplay_uct.py --size 3 --sims 2 --rollout_limit 6 --max_moves 12 --seed 2026
